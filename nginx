@@ -1,0 +1,36 @@
+upstream matterid {
+  server 127.0.0.1:8007;
+  keepalive 1;
+}
+
+server {
+  listen 80;
+  server_name auth.foulab.org;
+
+  if ($host = auth.foulab.org) {
+    return 301 https://$host$request_uri;
+  } # managed by Certbot
+
+  return 404; # managed by Certbot
+}
+
+server {
+  listen 443 ssl; # managed by Certbot
+  server_name auth.foulab.org;
+  ssl_certificate /etc/letsencrypt/live/auth.foulab.org/fullchain.pem; # managed by Certbot
+  ssl_certificate_key /etc/letsencrypt/live/auth.foulab.org/privkey.pem; # managed by Certbot
+  include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+  ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+  location = / {
+    return 302 https://foulab.org/;
+  }
+
+  location /matterid {
+    proxy_set_header Connection "";
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+    proxy_pass http://matterid;
+  }
+}
+
