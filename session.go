@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"strings"
 )
 
 type mattermostSessionProvider struct {
@@ -57,11 +58,42 @@ func (p *mattermostSessionProvider) GetSession(w http.ResponseWriter, r *http.Re
 
 // OAuth2 callback -> SAML Response
 func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *http.Request, idp *saml.IdentityProvider) {
-	query, err := url.ParseQuery(cbr.URL.Query().Get("state"))
+	state := cbr.URL.Query().Get("state")
+
+	query, err := url.ParseQuery(state)
 	if err != nil {
 		idp.Logger.Printf("cannot parse callback state: %s", cbr.URL.Query().Get("state"))
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
+	}
+
+	// Workaround Mattermost bug https://github.com/mattermost/mattermost/issues/20716
+	looksLikeMattermostBug := func (v url.Values) bool {
+		if len(query) == 1 {
+			for k, v := range query {
+				// Broken key and no value
+				if strings.HasPrefix(k, "RelayState=") && len(v) == 1 && v[0] == "" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if looksLikeMattermostBug(query) {
+		idp.Logger.Printf("Looks like Mattermost bug, applying workaround")
+		state, err = url.QueryUnescape(cbr.URL.Query().Get("state"))
+		if err != nil {
+			idp.Logger.Printf("cannot unescape callback state: %s", cbr.URL.Query().Get("state"))
+			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
+
+		query, err = url.ParseQuery(state)
+		if err != nil {
+			idp.Logger.Printf("cannot parse callback state: %s", state)
+			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
 	}
 
 	oauthCSRF, _ := cbr.Cookie("oauthcsrf")
@@ -84,7 +116,7 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 	r := &http.Request{
 		Method: "GET",
 		URL: &url.URL{
-			RawQuery: cbr.URL.Query().Get("state"),
+			RawQuery: state,
 		},
 	}
 
