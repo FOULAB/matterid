@@ -23,12 +23,13 @@ Related work:
 */
 
 import (
-	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"flag"
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/logger"
+	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/oauth2"
 	"log"
 	"net"
@@ -52,31 +53,36 @@ var serviceProvidersGlob = flag.String("serviceProvidersGlob", "tikiwiki.xml", "
 // Note: MUST run behind a reverse proxy that adds TLS
 var port = flag.Int("port", 8007, "Port for HTTP server")
 
-func readUsermap() map[string]string {
-	m := map[string]string{}
-
-	f, err := os.Open("usermap")
+func openUsermap() *sql.DB {
+	db, err := sql.Open("sqlite3", "usermap.sqlite3")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Usermap open error: %s\n", err)
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		// TODO: implement comments
-		fs := strings.Fields(scanner.Text())
-		if len(fs) == 0 {
-			continue
-		}
-		if len(fs) != 2 {
-			log.Fatal("Invalid usermap line: %s", scanner.Text())
-			return nil
-		}
-		// TODO: check for duplicates
-		m[fs[0]] = fs[1]
+	// PRIMARY KEY / UNIQUE are very important, they enforce that one user cannot
+	// impersonate another.
+	const create = `
+		CREATE TABLE IF NOT EXISTS usermap (
+			mattermost_id TEXT NOT NULL PRIMARY KEY,
+			tikiwiki_username TEXT NOT NULL,
+			created_at DATETIME
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS usermap_tikiwiki_username ON usermap (
+			tikiwiki_username
+		);
+	`
+	if _, err := db.Exec(create); err != nil {
+		log.Fatalf("Usermap create table error: %s\n", err)
 	}
-	log.Printf("usermap: %d entries", len(m))
-	return m
+
+	var count int
+	row := db.QueryRow(`SELECT COUNT(*) FROM usermap`)
+	if err = row.Scan(&count); err != nil {
+		log.Fatalf("Usermap query count error: %s\n", err)
+	}
+	log.Printf("usermap: %d entries", count)
+
+	return db
 }
 
 func readOAuthClientSecret() string {
@@ -139,7 +145,8 @@ func main() {
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
 	}
-	usermap := readUsermap()
+	usermap := openUsermap()
+	defer usermap.Close()
 
 	sessionProvider := NewMattermostSessionProvider(mattermostOauthConfig, usermap)
 

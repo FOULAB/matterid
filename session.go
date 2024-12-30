@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 
 type mattermostSessionProvider struct {
 	oauthConfig *oauth2.Config
-	usermap     map[string]string
+	usermap     *sql.DB
 }
 
 type mattermostUser struct {
@@ -23,7 +24,7 @@ type mattermostUser struct {
 	// other fields ignored
 }
 
-func NewMattermostSessionProvider(oauthConfig *oauth2.Config, usermap map[string]string) *mattermostSessionProvider {
+func NewMattermostSessionProvider(oauthConfig *oauth2.Config, usermap *sql.DB) *mattermostSessionProvider {
 	return &mattermostSessionProvider{oauthConfig: oauthConfig, usermap: usermap}
 }
 
@@ -141,8 +142,10 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 	// The only stable identifier is user.id. NOT safe to use 'username' or 'email',
 	// those are controlled by the user.
 
-	username, ok := p.usermap[user.Id]
-	if !ok {
+	var username string
+	row := p.usermap.QueryRow(`SELECT tikiwiki_username FROM usermap WHERE mattermost_id = ?`, user.Id)
+	err = row.Scan(&username)
+	if err == sql.ErrNoRows {
 		idp.Logger.Printf("User not in usermap")
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, `
@@ -165,6 +168,12 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 			</div>
 		`)
 		return
+	} else if err != nil {
+		idp.Logger.Printf("Usermap query error: %s", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	} else {
+		// User found, fall through
 	}
 
 	idp.Logger.Printf("Mapped to wiki user: %s", username)
