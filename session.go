@@ -20,7 +20,8 @@ type mattermostSessionProvider struct {
 }
 
 type mattermostUser struct {
-	Id string `json:"id"`
+	Id       string `json:"id"`
+	Username string `json:"username"`
 	// other fields ignored
 }
 
@@ -139,35 +140,97 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 	}
 
 	// Username mapping
-	// The only stable identifier is user.id. NOT safe to use 'username' or 'email',
-	// those are controlled by the user.
+	// The only stable identifier is user.id. Fields like 'username' or 'email'
+	// are controlled by the user and can be changed at will.
 
 	var username string
 	row := p.usermap.QueryRow(`SELECT tikiwiki_username FROM usermap WHERE mattermost_id = ?`, user.Id)
 	err = row.Scan(&username)
-	if err == sql.ErrNoRows {
+	if err == sql.ErrNoRows { // No user for this Mattermost ID
 		idp.Logger.Printf("User not in usermap")
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, `
-			<link rel="shortcut icon" href="https://foulab.org/favicon.ico" type="image/vnd.microsoft.icon" />
-			<title>Foulab Authentication</title>
-			<!-- match the style of Mattermost login page https://test.foulab.org/login -->
-			<body style="font-family: 'Open Sans', sans-serif; font-size: 18px">
-			<div style="margin: 0 auto; padding: 100px 0 50px; display: flex; max-width: 900px">
-				<div style="flex: 1.3; padding-right: 80px">
-					<img style="max-width: 450px" src="https://test.foulab.org/api/v4/brand/image?t=0" />
+
+		// Check if there is already a wiki account with this username.
+		//
+		// This is RACY, because someone can create an account between this SELECT
+		// and the INSERT which creates the account.
+		//
+		// The INSERT below (and the UNIQUE INDEX) is the mechanism which
+		// atomically enforces uniqueness.
+		var count int
+		row = p.usermap.QueryRow(`SELECT COUNT(*) FROM usermap WHERE tikiwiki_username = ?`, user.Username)
+		err = row.Scan(&count)
+		if err == sql.ErrNoRows { // No user for this Mattermost Username
+			if err = cbr.ParseForm(); err != nil {
+				idp.Logger.Printf("Parse form error: %s", err.Error())
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				return
+			}
+
+			if cbr.Form.Get("continue") == "" {
+				w.Header().Set("Content-Type", "text/html")
+				fmt.Fprintf(w, `
+					<link rel="shortcut icon" href="https://foulab.org/favicon.ico" type="image/vnd.microsoft.icon" />
+					<title>Foulab Authentication</title>
+					<!-- match the style of Mattermost login page https://test.foulab.org/login -->
+					<body style="font-family: 'Open Sans', sans-serif; font-size: 18px">
+					<div style="margin: 0 auto; padding: 100px 0 50px; display: flex; max-width: 900px">
+						<div style="flex: 1.3; padding-right: 80px">
+							<img style="max-width: 450px" src="https://test.foulab.org/api/v4/brand/image?t=0" />
+						</div>
+						<div>
+							<p>You are creating a wiki account with your Mattermost username <b>%s</b>.</p>
+							<p><b>All your wiki edits, chat messages, forum posts, etc, will be permanently
+							linked to this username.</b></p>
+							<p>The username cannot be changed once the account is created.</p>
+							<p>If you want to change this username, go back and
+							<a href="https://docs.mattermost.com/preferences/manage-your-profile.html" target="_blank">
+							modify your Mattermost profile</a>, then try to access the wiki again.</p>
+							<p>If you have any questions, feel free to post on Mattermost
+							<a href="https://test.foulab.org/foulab/channels/tech-support">Tech Support</a> channel.</p>
+							<p style="font-size: 200%">
+								<form action="%s" method="post">
+									<input type="submit" name="continue" value="Continue with this username ›" />
+								</form>
+							</p>
+						</div>
+					</div>
+				`)
+				return
+			} else {
+				// Very Important: ensures uniqueness of ID <-> Username mapping.
+				_, err = p.usermap.Exec(
+					`INSERT INTO usermap (mattermost_id, tikiwiki_username, created_at) VALUES (?, ?, ?)`,
+					user.Id, user.Username, time.Now())
+				if err != nil {
+					idp.Logger.Printf("usermap insert error: %s", err.Error())
+					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+					return
+				}
+			}
+		} else {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, `
+				<link rel="shortcut icon" href="https://foulab.org/favicon.ico" type="image/vnd.microsoft.icon" />
+				<title>Foulab Authentication</title>
+				<!-- match the style of Mattermost login page https://test.foulab.org/login -->
+				<body style="font-family: 'Open Sans', sans-serif; font-size: 18px">
+				<div style="margin: 0 auto; padding: 100px 0 50px; display: flex; max-width: 900px">
+					<div style="flex: 1.3; padding-right: 80px">
+						<img style="max-width: 450px" src="https://test.foulab.org/api/v4/brand/image?t=0" />
+					</div>
+					<div>
+						<p>Sorry, there is already a wiki account with the Mattermost username <b>%s</b>.</p>
+						<p>The same username cannot be used to create a new account.</p>
+						<p>If you want to try with a different username, go back and
+						<a href="https://docs.mattermost.com/preferences/manage-your-profile.html" target="_blank">
+						modify your Mattermost profile</a>, then try to access the wiki again.</p>
+						<p>If you have any questions, feel free to post on Mattermost
+						<a href="https://test.foulab.org/foulab/channels/tech-support">Tech Support</a> channel.</p>
+					</div>
 				</div>
-				<div>
-					<p>Sorry, your user is not yet activated for wiki access.</p>
-					<p>Please post on the Mattermost <i>Tech Support</i> channel to ask to be activated.</p>
-					<ul>
-						<li><a href="https://test.foulab.org/foulab/channels/tech-support">Go to <i>Tech Support</i> channel now</a></li>
-						<li><a href="https://laboratoires.foulab.org/w/">Go back to TikiWiki</a></li>
-					</ul>
-				</div>
-			</div>
-		`)
-		return
+			`)
+			return
+		}
 	} else if err != nil {
 		idp.Logger.Printf("Usermap query error: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
