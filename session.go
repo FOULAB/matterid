@@ -139,6 +139,12 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 		return
 	}
 
+	if user.Username == "admin" {
+		idp.Logger.Printf("Mattermost Username 'admin' not allowed")
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+
 	// Username mapping
 	// The only stable identifier is user.id. Fields like 'username' or 'email'
 	// are controlled by the user and can be changed at will.
