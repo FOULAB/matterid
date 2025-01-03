@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"github.com/crewjam/saml"
 	"golang.org/x/oauth2"
 	"io/ioutil"
@@ -79,6 +80,8 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 		return
 	}
 
+	// By default, clear CSRF cookie as soon as the flow is complete. Note some
+	// code paths ('Continue' interstitial) override this before returning.
 	cookie := http.Cookie{Name: "oauthcsrf", Expires: time.Unix(0, 0)}
 	http.SetCookie(w, &cookie)
 
@@ -107,7 +110,7 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 	// Finish OAuth2
 	token, err := p.oauthConfig.Exchange(cbr.Context(), cbr.FormValue("code"))
 	if err != nil {
-		idp.Logger.Printf("code exchange wrong: %s", err.Error())
+		idp.Logger.Printf("OAuth code exchange error: %s", err.Error())
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -162,9 +165,9 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 		//
 		// The INSERT below (and the UNIQUE INDEX) is the mechanism which
 		// atomically enforces uniqueness.
-		var count int
-		row = p.usermap.QueryRow(`SELECT COUNT(*) FROM usermap WHERE tikiwiki_username = ?`, user.Username)
-		err = row.Scan(&count)
+		var dummy int
+		row = p.usermap.QueryRow(`SELECT 1 FROM usermap WHERE tikiwiki_username = ?`, user.Username)
+		err = row.Scan(&dummy)
 		if err == sql.ErrNoRows { // No user for this Mattermost Username
 			if err = cbr.ParseForm(); err != nil {
 				idp.Logger.Printf("Parse form error: %s", err.Error())
@@ -173,7 +176,10 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 			}
 
 			if cbr.Form.Get("continue") == "" {
-				w.Header().Set("Content-Type", "text/html")
+				// Keep the CSRF cookie until the flow is complete.
+				w.Header().Del("Set-Cookie")
+
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				fmt.Fprintf(w, `
 					<link rel="shortcut icon" href="https://foulab.org/favicon.ico" type="image/vnd.microsoft.icon" />
 					<title>Foulab Authentication</title>
@@ -184,7 +190,7 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 							<img style="max-width: 450px" src="https://test.foulab.org/api/v4/brand/image?t=0" />
 						</div>
 						<div>
-							<p>You are creating a wiki account with your Mattermost username <b>%s</b>.</p>
+							<h2>You are creating a wiki account with your Mattermost username <i>%s</i>.</h2>
 							<p><b>All your wiki edits, chat messages, forum posts, etc, will be permanently
 							linked to this username.</b></p>
 							<p>The username cannot be changed once the account is created.</p>
@@ -192,15 +198,22 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 							<a href="https://docs.mattermost.com/preferences/manage-your-profile.html" target="_blank">
 							modify your Mattermost profile</a>, then try to access the wiki again.</p>
 							<p>If you have any questions, feel free to post on Mattermost
-							<a href="https://test.foulab.org/foulab/channels/tech-support">Tech Support</a> channel.</p>
-							<p style="font-size: 200%">
-								<form action="%s" method="post">
-									<input type="submit" name="continue" value="Continue with this username ›" />
-								</form>
-							</p>
+							<a href="https://test.foulab.org/foulab/channels/tech-support" target="_blank">Tech Support</a> channel.</p>
+							<form action="%s" method="post">
+								<input type="submit" name="continue" value="Continue with this username ›" style="font-size: 100%%" />
+							</form>
 						</div>
 					</div>
-				`)
+				`, html.EscapeString(user.Username), html.EscapeString(cbr.URL.RequestURI()))
+
+				// TODO: This does not actually work, 'Continue' can't exchange the
+				// OAuth2 code a second time:
+				/*
+				2025/01/03 17:03:53 70.80.21.217 POST /matterid/callback?code=<redacted>&state=<redacted>
+				2025/01/03 17:03:53 code exchange wrong: oauth2: cannot fetch token: 400 Bad Request
+				Response: {"id":"api.oauth.get_access_token.expired_code.app_error","message":"invalid_grant: Invalid or expired authorization code.","detailed_error":"","request_id":"5fszmwz1w38uubpo6mx9rydo5a","status_code":400}
+				*/
+
 				return
 			} else {
 				// Very Important: ensures uniqueness of ID <-> Username mapping.
@@ -214,7 +227,7 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 				}
 			}
 		} else {
-			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			fmt.Fprintf(w, `
 				<link rel="shortcut icon" href="https://foulab.org/favicon.ico" type="image/vnd.microsoft.icon" />
 				<title>Foulab Authentication</title>
@@ -225,16 +238,16 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 						<img style="max-width: 450px" src="https://test.foulab.org/api/v4/brand/image?t=0" />
 					</div>
 					<div>
-						<p>Sorry, there is already a wiki account with the Mattermost username <b>%s</b>.</p>
+						<h2>Sorry, there is already a wiki account with the Mattermost username <i>%s</i>.</h2>
 						<p>The same username cannot be used to create a new account.</p>
 						<p>If you want to try with a different username, go back and
 						<a href="https://docs.mattermost.com/preferences/manage-your-profile.html" target="_blank">
 						modify your Mattermost profile</a>, then try to access the wiki again.</p>
 						<p>If you have any questions, feel free to post on Mattermost
-						<a href="https://test.foulab.org/foulab/channels/tech-support">Tech Support</a> channel.</p>
+						<a href="https://test.foulab.org/foulab/channels/tech-support" target="_blank">Tech Support</a> channel.</p>
 					</div>
 				</div>
-			`)
+			`, html.EscapeString(user.Username))
 			return
 		}
 	} else if err != nil {
