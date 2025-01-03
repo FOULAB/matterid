@@ -169,13 +169,7 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 		row = p.usermap.QueryRow(`SELECT 1 FROM usermap WHERE tikiwiki_username = ?`, user.Username)
 		err = row.Scan(&dummy)
 		if err == sql.ErrNoRows { // No user for this Mattermost Username
-			if err = cbr.ParseForm(); err != nil {
-				idp.Logger.Printf("Parse form error: %s", err.Error())
-				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-				return
-			}
-
-			if cbr.Form.Get("continue") == "" {
+			if cbr.FormValue("continue") == "" {
 				// Keep the CSRF cookie until the flow is complete.
 				w.Header().Del("Set-Cookie")
 
