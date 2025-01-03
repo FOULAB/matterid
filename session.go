@@ -163,7 +163,7 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 	row := p.usermap.QueryRow(`SELECT tikiwiki_username FROM usermap WHERE mattermost_id = ?`, user.Id)
 	err = row.Scan(&username)
 	if err == sql.ErrNoRows { // No user for this Mattermost ID
-		idp.Logger.Printf("User not in usermap")
+		idp.Logger.Printf("Mattermost ID not in usermap")
 
 		// Check if there is already a wiki account with this username.
 		//
@@ -234,6 +234,8 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 				username = user.Username
 			}
 		} else {
+			idp.Logger.Printf("Username is already taken")
+
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			fmt.Fprintf(w, `
 				<link rel="shortcut icon" href="https://foulab.org/favicon.ico" type="image/vnd.microsoft.icon" />
