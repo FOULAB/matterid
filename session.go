@@ -6,9 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html"
 	"github.com/crewjam/saml"
 	"golang.org/x/oauth2"
+	"html"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -107,12 +107,19 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 		return
 	}
 
-	// Finish OAuth2
-	token, err := p.oauthConfig.Exchange(cbr.Context(), cbr.FormValue("code"))
-	if err != nil {
-		idp.Logger.Printf("OAuth code exchange error: %s", err.Error())
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
+	var token *oauth2.Token
+	if cbr.FormValue("access_token") == "" { // First phase, before 'Continue' interstitial
+		// Finish OAuth2
+		token, err = p.oauthConfig.Exchange(cbr.Context(), cbr.FormValue("code"))
+		if err != nil {
+			idp.Logger.Printf("OAuth code exchange error: %s", err.Error())
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+	} else { // Second phase, OAuth2 exchange already done, existing access token
+		token = &oauth2.Token{
+			AccessToken: cbr.FormValue("access_token"),
+		}
 	}
 
 	client := p.oauthConfig.Client(cbr.Context(), token)
@@ -170,8 +177,15 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 		err = row.Scan(&dummy)
 		if err == sql.ErrNoRows { // No user for this Mattermost Username
 			if cbr.FormValue("continue") == "" {
+				idp.Logger.Printf("Username is available, offering it")
+
 				// Keep the CSRF cookie until the flow is complete.
 				w.Header().Del("Set-Cookie")
+
+				// OAuth code has already been exchanged, drop it for clarity.
+				q := cbr.URL.Query()
+				q.Del("code")
+				cbr.URL.RawQuery = q.Encode()
 
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				fmt.Fprintf(w, `
@@ -194,22 +208,16 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 							<p>If you have any questions, feel free to post on Mattermost
 							<a href="https://test.foulab.org/foulab/channels/tech-support" target="_blank">Tech Support</a> channel.</p>
 							<form action="%s" method="post">
+								<input type="hidden" name="access_token" value="%s" />
 								<input type="submit" name="continue" value="Continue with this username ›" style="font-size: 100%%" />
 							</form>
 						</div>
 					</div>
-				`, html.EscapeString(user.Username), html.EscapeString(cbr.URL.RequestURI()))
-
-				// TODO: This does not actually work, 'Continue' can't exchange the
-				// OAuth2 code a second time:
-				/*
-				2025/01/03 17:03:53 70.80.21.217 POST /matterid/callback?code=<redacted>&state=<redacted>
-				2025/01/03 17:03:53 code exchange wrong: oauth2: cannot fetch token: 400 Bad Request
-				Response: {"id":"api.oauth.get_access_token.expired_code.app_error","message":"invalid_grant: Invalid or expired authorization code.","detailed_error":"","request_id":"5fszmwz1w38uubpo6mx9rydo5a","status_code":400}
-				*/
-
+				`, html.EscapeString(user.Username), html.EscapeString(cbr.URL.RequestURI()), html.EscapeString(token.AccessToken))
 				return
 			} else {
+				idp.Logger.Printf("Creating new user")
+
 				// Very Important: ensures uniqueness of ID <-> Username mapping.
 				_, err = p.usermap.Exec(
 					`INSERT INTO usermap (mattermost_id, tikiwiki_username, created_at) VALUES (?, ?, ?)`,
@@ -219,6 +227,11 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
 				}
+
+				idp.Logger.Printf("Created user: %q", user.Username)
+
+				// Just created user
+				username = user.Username
 			}
 		} else {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -249,7 +262,7 @@ func (p *mattermostSessionProvider) ServeCallback(w http.ResponseWriter, cbr *ht
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	} else {
-		// User found, fall through
+		idp.Logger.Printf("User found in usermap")
 	}
 
 	idp.Logger.Printf("Mapped to wiki user: %s", username)
